@@ -1,54 +1,21 @@
-// const mysql = require('mysql');
-// require('dotenv').config();
-
-// const dbConfig = {
-//   host: process.env.DB_HOST,
-//   user: process.env.DB_USER,
-//   password: process.env.DB_PASSWORD,
-//   database: process.env.DB_DATABASE,
-//   port: parseInt(process.env.DB_PORT) || 3306,
-// };
-
-// const connection = mysql.createConnection(dbConfig);
-
-// connection.connect(err => {
-//   if (err) {
-//     console.error('Database connection failed: ' + err.stack);
-//     return;
-//   }
-//   console.log('Connected to MySQL as id ' + connection.threadId);
-// });
-
-// module.exports = connection;
-
-
-const sql = require('mssql');
+const mysql = require('mysql2/promise');
 require('dotenv').config();
 
-const dbConfig = {
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  server: process.env.DB_SERVER,
-  database: process.env.DB_DATABASE,
-  port: parseInt(process.env.DB_PORT) || 1433,
-  options: {
-    encrypt: false, 
-    enableArithAbort: true
-  }
-};
+  database: process.env.DB_NAME,
+  port: process.env.PORT || 3306 
+});
 
-const poolPromise = new sql.ConnectionPool(dbConfig)
-  .connect()
-  .then(pool => {
-    console.log('Connected to MSSQL');
-    return pool;
+pool.getConnection()
+  .then(conn => {
+    console.log('Database connected successfully!');
+    conn.release();
   })
   .catch(err => {
-    console.error('Database Connection Failed! Bad Config: ', err);
+    console.error('Database connection failed:', err.message);
   });
 
-module.exports = {
-  sql, poolPromise
-};
-
-
+module.exports = pool;

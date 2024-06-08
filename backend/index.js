@@ -1,135 +1,129 @@
+// index.js
 const express = require('express');
-const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const sql = require('mssql');
+const cors = require('cors');
+const pool = require('./db');
 require('dotenv').config();
-const db = require('./db');
 
 const app = express();
-const port = 5000;
+const port = 5000; // Use the specified port
 
-app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(cors());
 
-const jwtSecret = process.env.JWT_SECRET;
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403);
+    req.user = user;
+    next();
+  });
+};
 
 // Register a new user
 app.post('/register', async (req, res) => {
   const { username, password, role } = req.body;
+
   try {
-    const pool = await db.poolPromise;
     const hashedPassword = await bcrypt.hash(password, 10);
-    const result = await pool.request()
-      .input('username', sql.NVarChar, username)
-      .input('password', sql.NVarChar, hashedPassword)
-      .input('role', sql.NVarChar, role)
-      .query('INSERT INTO users (username, password, role) VALUES (@username, @password, @role)');
+    const [result] = await pool.query(
+      'INSERT INTO users (username, password, role) VALUES (?, ?, ?)',
+      [username, hashedPassword, role]
+    );
     res.status(201).send({ message: 'User registered successfully' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
 });
 
-// Login
+// Login user and get token
 app.post('/login', async (req, res) => {
   const { username, password } = req.body;
+
   try {
-    const pool = await db.poolPromise;
-    const result = await pool.request()
-      .input('username', sql.NVarChar, username)
-      .query('SELECT * FROM users WHERE username = @username');
+    const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
+    if (rows.length === 0) return res.status(400).send({ error: 'Invalid credentials' });
 
-    if (result.recordset.length === 0) {
-      return res.status(400).send({ message: 'Invalid credentials' });
-    }
+    const user = rows[0];
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) return res.status(400).send({ error: 'Invalid credentials' });
 
-    const user = result.recordset[0];
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(400).send({ message: 'Invalid credentials' });
-    }
-
-    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, jwtSecret, { expiresIn: '1h' });
+    const token = jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '1h' });
     res.send({ token });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
 });
 
-// Middleware to authenticate JWT
-const authenticateJWT = (req, res, next) => {
-  const token = req.header('Authorization')?.replace('Bearer ', '');
-  if (!token) return res.status(401).send({ message: 'Access denied' });
-
+// Get all users
+app.get('/users', authenticateToken, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, jwtSecret);
-    req.user = decoded;
-    next();
-  } catch (err) {
-    res.status(400).send({ message: 'Invalid token' });
-  }
-};
-
-// Example of a protected route
-app.get('/protected', authenticateJWT, (req, res) => {
-  res.send({ message: 'This is a protected route', user: req.user });
-});
-
-// CRUD Operations
-app.post('/items', authenticateJWT, async (req, res) => {
-  // Example protected create operation
-  try {
-    const pool = await db.poolPromise;
-    const { name } = req.body;
-    const result = await pool.request()
-      .input('name', sql.NVarChar, name)
-      .query('INSERT INTO items (name) OUTPUT inserted.id VALUES (@name)');
-    res.json(result.recordset[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    const [rows] = await pool.query('SELECT id, username, role, created_at, updated_at FROM users');
+    res.send(rows);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
 });
 
-app.get('/items', authenticateJWT, async (req, res) => {
-  // Example protected read operation
+// Get a single user by ID
+app.get('/users/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
   try {
-    const pool = await db.poolPromise;
-    const result = await pool.request().query('SELECT * FROM items');
-    res.json(result.recordset);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    const [rows] = await pool.query('SELECT id, username, role, created_at, updated_at FROM users WHERE id = ?', [id]);
+    if (rows.length === 0) return res.status(404).send({ error: 'User not found' });
+    res.send(rows[0]);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
 });
 
-app.put('/items/:id', authenticateJWT, async (req, res) => {
-  // Example protected update operation
+// Update a user
+app.put('/users/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { username, password, role } = req.body;
+
   try {
-    const pool = await db.poolPromise;
-    const { id } = req.params;
-    const { name } = req.body;
-    await pool.request()
-      .input('id', sql.Int, id)
-      .input('name', sql.NVarChar, name)
-      .query('UPDATE items SET name = @name WHERE id = @id');
-    res.json({ id, name });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    let query = 'UPDATE users SET ';
+    const params = [];
+    if (username) {
+      query += 'username = ?, ';
+      params.push(username);
+    }
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      query += 'password = ?, ';
+      params.push(hashedPassword);
+    }
+    if (role) {
+      query += 'role = ?, ';
+      params.push(role);
+    }
+    query = query.slice(0, -2); // Remove trailing comma and space
+    query += ' WHERE id = ?';
+    params.push(id);
+
+    const [result] = await pool.query(query, params);
+    if (result.affectedRows === 0) return res.status(404).send({ error: 'User not found' });
+    res.send({ message: 'User updated successfully' });
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
 });
 
-app.delete('/items/:id', authenticateJWT, async (req, res) => {
-  // Example protected delete operation
+// Delete a user
+app.delete('/users/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
   try {
-    const pool = await db.poolPromise;
-    const { id } = req.params;
-    await pool.request()
-      .input('id', sql.Int, id)
-      .query('DELETE FROM items WHERE id = @id');
-    res.json({ message: 'Item deleted' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    const [result] = await pool.query('DELETE FROM users WHERE id = ?', [id]);
+    if (result.affectedRows === 0) return res.status(404).send({ error: 'User not found' });
+    res.send({ message: 'User deleted successfully' });
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
 });
 
